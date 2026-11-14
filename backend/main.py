@@ -1,41 +1,88 @@
+from dotenv import load_dotenv
 
+load_dotenv()
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from pypdf import PdfReader
 from docx import Document
 from io import BytesIO
 from pydantic import BaseModel
+import os
+import psycopg
+from psycopg.rows import dict_row
 
 
 
+import os
 import sqlite3
 from datetime import datetime
+
 from fastapi.middleware.cors import CORSMiddleware
+from groq import Groq
 import ollama
 
-MODEL_NAME = "llama3.2:3b"
+# AI configuration
+AI_PROVIDER = os.getenv("AI_PROVIDER", "ollama").lower()
+
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2:3b")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 
 def generate_ai_response(prompt):
     try:
-        response = ollama.chat(
-            model=MODEL_NAME,
-            messages=[
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ]
-        )
+        if AI_PROVIDER == "groq":
+            api_key = os.getenv("GROQ_API_KEY")
 
-        return response["message"]["content"]
+            if not api_key:
+                raise HTTPException(
+                    status_code=503,
+                    detail="Groq API key is not configured."
+                )
+
+            client = Groq(api_key=api_key)
+
+            response = client.chat.completions.create(
+                model=GROQ_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
+                temperature=0.7,
+                max_completion_tokens=2048
+            )
+
+            return response.choices[0].message.content
+
+        elif AI_PROVIDER == "ollama":
+            response = ollama.chat(
+                model=OLLAMA_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ]
+            )
+
+            return response["message"]["content"]
+
+        else:
+            raise HTTPException(
+                status_code=500,
+                detail="Invalid AI provider configuration."
+            )
+
+    except HTTPException:
+        raise
 
     except Exception as e:
-        print("OLLAMA ERROR:", repr(e), flush=True)
+        print("AI PROVIDER ERROR:", repr(e), flush=True)
 
         raise HTTPException(
             status_code=503,
-            detail="Local AI is unavailable. Please make sure Ollama is running."
+            detail="The AI service is temporarily unavailable. Please try again."
         )
 
 
@@ -45,20 +92,33 @@ app = FastAPI(
     description="AI-powered career and internship assistant",
     version="1.0.0"
 )
+
+# Frontend origins allowed to access the backend
+FRONTEND_URLS = os.getenv("FRONTEND_URLS", "")
+
+allowed_origins = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5180",
+    "http://127.0.0.1:5180",
+    "http://localhost:5181",
+    "http://127.0.0.1:5181",
+]
+
+allowed_origins.extend(
+    origin.strip().rstrip("/")
+    for origin in FRONTEND_URLS.split(",")
+    if origin.strip()
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:5180",
-        "http://127.0.0.1:5180",
-        "http://localhost:5181",
-        "http://127.0.0.1:5181",
-    ],
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 
 # Request structure
@@ -639,94 +699,89 @@ def evaluate_answer(request: InterviewEvaluationRequest):
     }
 # Application Tracker Database
 
-DATABASE_NAME = "hiremegent.db"
+
+# Application Tracker Database — Supabase PostgreSQL
+
+DATABASE_URL = os.getenv("DATABASE_URL")
+
+
+def get_db_connection():
+    if not DATABASE_URL:
+        raise HTTPException(
+            status_code=503,
+            detail="Database connection is not configured."
+        )
+
+    return psycopg.connect(
+        DATABASE_URL,
+        sslmode="require",
+        row_factory=dict_row
+    )
 
 
 def create_database():
-
-    connection = sqlite3.connect(DATABASE_NAME)
-
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS applications (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            company_name TEXT NOT NULL,
-            job_role TEXT NOT NULL,
-            application_link TEXT,
-            application_date TEXT,
-            status TEXT DEFAULT 'Applied',
-            notes TEXT
-        )
-    """)
-
-    connection.commit()
-    connection.close()
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS applications (
+                    id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    company_name TEXT NOT NULL,
+                    job_role TEXT NOT NULL,
+                    application_link TEXT,
+                    application_date TEXT,
+                    status TEXT DEFAULT 'Applied',
+                    notes TEXT
+                )
+            """)
 
 
-create_database() 
+create_database()
+
 
 @app.post("/applications")
 def add_application(request: ApplicationRequest):
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                INSERT INTO applications
+                (company_name, job_role, application_link,
+                 application_date, status, notes)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                RETURNING id
+            """, (
+                request.company_name,
+                request.job_role,
+                request.application_link,
+                datetime.now().strftime("%Y-%m-%d"),
+                request.status,
+                request.notes
+            ))
 
-    connection = sqlite3.connect(DATABASE_NAME)
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        INSERT INTO applications
-        (company_name, job_role, application_link, application_date, status, notes)
-        VALUES (?, ?, ?, ?, ?, ?)
-    """, (
-        request.company_name,
-        request.job_role,
-        request.application_link,
-        datetime.now().strftime("%Y-%m-%d"),
-        request.status,
-        request.notes
-    ))
-
-    connection.commit()
-    application_id = cursor.lastrowid
-    connection.close()
+            application_id = cursor.fetchone()["id"]
 
     return {
         "message": "Application added successfully!",
         "application_id": application_id
     }
 
+
 @app.get("/applications")
 def get_applications():
-
-    connection = sqlite3.connect(DATABASE_NAME)
-    cursor = connection.cursor()
-
-    cursor.execute("""
-        SELECT id, company_name, job_role,
-               application_link, application_date, status, notes
-        FROM applications
-        ORDER BY id DESC
-    """)
-
-    rows = cursor.fetchall()
-    connection.close()
-
-    applications = []
-
-    for row in rows:
-        applications.append({
-            "id": row[0],
-            "company_name": row[1],
-            "job_role": row[2],
-            "application_link": row[3],
-            "application_date": row[4],
-            "status": row[5],
-            "notes": row[6]
-        })
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id, company_name, job_role,
+                       application_link, application_date, status, notes
+                FROM applications
+                ORDER BY id DESC
+            """)
+            applications = cursor.fetchall()
 
     return {
         "total_applications": len(applications),
         "applications": applications
     }
+
 
 @app.patch("/applications/{application_id}/status")
 def update_application_status(
@@ -748,23 +803,20 @@ def update_application_status(
             detail="Invalid application status."
         )
 
-    connection = sqlite3.connect(DATABASE_NAME)
-    cursor = connection.cursor()
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                UPDATE applications
+                SET status = %s, notes = %s
+                WHERE id = %s
+                RETURNING id
+            """, (request.status, request.notes, application_id))
 
-    cursor.execute(
-        "UPDATE applications SET status = ? WHERE id = ?",
-        (request.status, application_id)
-    )
-
-    if cursor.rowcount == 0:
-        connection.close()
-        raise HTTPException(
-            status_code=404,
-            detail="Application not found."
-        )
-
-    connection.commit()
-    connection.close()
+            if cursor.fetchone() is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Application not found."
+                )
 
     return {
         "message": "Application status updated successfully!",
@@ -772,93 +824,66 @@ def update_application_status(
         "new_status": request.status
     }
 
+
 @app.delete("/applications/{application_id}")
 def delete_application(application_id: int):
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                DELETE FROM applications
+                WHERE id = %s
+                RETURNING id
+            """, (application_id,))
 
-    connection = sqlite3.connect(DATABASE_NAME)
-    cursor = connection.cursor()
-
-    cursor.execute(
-        "DELETE FROM applications WHERE id = ?",
-        (application_id,)
-    )
-
-    if cursor.rowcount == 0:
-        connection.close()
-        raise HTTPException(
-            status_code=404,
-            detail="Application not found."
-        )
-
-    connection.commit()
-    connection.close()
+            if cursor.fetchone() is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Application not found."
+                )
 
     return {
         "message": "Application deleted successfully!",
         "application_id": application_id
     }
 
+
 @app.get("/application-statistics")
 def application_statistics():
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT
+                    COUNT(*) AS total_applications,
+                    COUNT(*) FILTER (WHERE status = 'Applied') AS applied,
+                    COUNT(*) FILTER (WHERE status = 'Assessment') AS assessments,
+                    COUNT(*) FILTER (WHERE status = 'Interview Scheduled') AS interviews,
+                    COUNT(*) FILTER (WHERE status = 'Selected') AS selected,
+                    COUNT(*) FILTER (WHERE status = 'Rejected') AS rejected,
+                    COUNT(*) FILTER (WHERE status = 'Withdrawn') AS withdrawn
+                FROM applications
+            """)
+            stats = cursor.fetchone()
 
-    connection = sqlite3.connect(DATABASE_NAME)
-    cursor = connection.cursor()
+    return stats
 
-    cursor.execute("""
-        SELECT
-            COUNT(*),
-            SUM(CASE WHEN status = 'Applied' THEN 1 ELSE 0 END),
-            SUM(CASE WHEN status = 'Assessment' THEN 1 ELSE 0 END),
-            SUM(CASE WHEN status = 'Interview Scheduled' THEN 1 ELSE 0 END),
-            SUM(CASE WHEN status = 'Selected' THEN 1 ELSE 0 END),
-            SUM(CASE WHEN status = 'Rejected' THEN 1 ELSE 0 END),
-            SUM(CASE WHEN status = 'Withdrawn' THEN 1 ELSE 0 END)
-        FROM applications
-    """)
-
-    row = cursor.fetchone()
-    connection.close()
-
-    return {
-        "total_applications": row[0],
-        "applied": row[1] or 0,
-        "assessments": row[2] or 0,
-        "interviews": row[3] or 0,
-        "selected": row[4] or 0,
-        "rejected": row[5] or 0,
-        "withdrawn": row[6] or 0
-    }
 
 @app.get("/applications/{application_id}")
 def get_application_by_id(application_id: int):
+    with get_db_connection() as connection:
+        with connection.cursor() as cursor:
+            cursor.execute("""
+                SELECT id, company_name, job_role,
+                       application_link, application_date, status, notes
+                FROM applications
+                WHERE id = %s
+            """, (application_id,))
 
-    connection = sqlite3.connect(DATABASE_NAME)
-    cursor = connection.cursor()
+            application = cursor.fetchone()
 
-    cursor.execute("""
-        SELECT id, company_name, job_role,
-               application_link, application_date, status, notes
-        FROM applications
-        WHERE id = ?
-    """, (application_id,))
-
-    row = cursor.fetchone()
-    connection.close()
-
-    if row is None:
+    if application is None:
         raise HTTPException(
             status_code=404,
             detail="Application not found."
         )
 
-    return {
-        "id": row[0],
-        "company_name": row[1],
-        "job_role": row[2],
-        "application_link": row[3],
-        "application_date": row[4],
-        "status": row[5],
-        "notes": row[6]
-    }
-
-
+    return application

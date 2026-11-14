@@ -5,7 +5,7 @@ import CrystalBubbles from "./components/CrystalBubbles";
 import { useState, useEffect } from "react";
 import Workspace from "./components/Workspace";
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = (import.meta.env.VITE_API_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 
 const tools = [
   {
