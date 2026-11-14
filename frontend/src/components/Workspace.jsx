@@ -4,6 +4,185 @@ import "./Workspace.css";
 const API = (import.meta.env.VITE_API_URL || "http://127.0.0.1:8000").replace(/\/$/, "");
 const RESUME_STORAGE_KEY = "hiremegent_resume_text";
 
+function formatInline(text) {
+  const parts = text.split(
+    /(\*\*.*?\*\*|__.*?__|`.*?`|\*.*?\*|_.*?_)/g
+  );
+
+  return parts.map((part, index) => {
+    if (
+      (part.startsWith("**") && part.endsWith("**")) ||
+      (part.startsWith("__") && part.endsWith("__"))
+    ) {
+      return <strong key={index}>{part.slice(2, -2)}</strong>;
+    }
+
+    if (
+      (part.startsWith("*") && part.endsWith("*")) ||
+      (part.startsWith("_") && part.endsWith("_"))
+    ) {
+      return <em key={index}>{part.slice(1, -1)}</em>;
+    }
+
+    if (part.startsWith("`") && part.endsWith("`")) {
+      return <code key={index}>{part.slice(1, -1)}</code>;
+    }
+
+    return part;
+  });
+}
+
+function FormattedResponse({ content }) {
+  if (!content) return null;
+
+  const lines = String(content)
+    .replace(/\r\n?/g, "\n")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .split("\n");
+
+  const blocks = [];
+  let paragraph = [];
+  let list = [];
+  let listType = "";
+  let code = [];
+  let inCode = false;
+
+  const flushParagraph = () => {
+    if (paragraph.length) {
+      blocks.push(
+        <p key={`p-${blocks.length}`}>
+          {formatInline(paragraph.join(" "))}
+        </p>
+      );
+      paragraph = [];
+    }
+  };
+
+  const flushList = () => {
+    if (list.length) {
+      const Tag = listType === "ordered" ? "ol" : "ul";
+
+      blocks.push(
+        <Tag key={`list-${blocks.length}`}>
+          {list.map((item, index) => (
+            <li key={index}>{formatInline(item)}</li>
+          ))}
+        </Tag>
+      );
+
+      list = [];
+      listType = "";
+    }
+  };
+
+  lines.forEach((rawLine, index) => {
+    const line = rawLine.trim();
+
+    if (line.startsWith("```")) {
+      flushParagraph();
+      flushList();
+
+      if (inCode) {
+        blocks.push(
+          <pre key={`code-${index}`}>
+            <code>{code.join("\n")}</code>
+          </pre>
+        );
+        code = [];
+        inCode = false;
+      } else {
+        inCode = true;
+      }
+
+      return;
+    }
+
+    if (inCode) {
+      code.push(rawLine);
+      return;
+    }
+
+    if (!line) {
+      flushParagraph();
+      flushList();
+      return;
+    }
+
+    const heading = line.match(/^(#{1,3})\s+(.+)$/);
+
+    if (heading) {
+      flushParagraph();
+      flushList();
+
+      const Tag = `h${heading[1].length}`;
+
+      blocks.push(
+        <Tag key={`heading-${index}`}>
+          {formatInline(heading[2])}
+        </Tag>
+      );
+      return;
+    }
+
+    if (/^[-*•]\s+/.test(line)) {
+      flushParagraph();
+
+      if (listType !== "unordered") {
+        flushList();
+        listType = "unordered";
+      }
+
+      list.push(line.replace(/^[-*•]\s+/, ""));
+      return;
+    }
+
+    if (/^\d+[.)]\s+/.test(line)) {
+      flushParagraph();
+
+      if (listType !== "ordered") {
+        flushList();
+        listType = "ordered";
+      }
+
+      list.push(line.replace(/^\d+[.)]\s+/, ""));
+      return;
+    }
+
+    if (line.startsWith(">")) {
+      flushParagraph();
+      flushList();
+
+      blocks.push(
+        <blockquote key={`quote-${index}`}>
+          {formatInline(line.replace(/^>\s?/, ""))}
+        </blockquote>
+      );
+      return;
+    }
+
+    flushList();
+    paragraph.push(line);
+  });
+
+  flushParagraph();
+  flushList();
+
+  if (inCode && code.length) {
+    blocks.push(
+      <pre key="unfinished-code">
+        <code>{code.join("\n")}</code>
+      </pre>
+    );
+  }
+
+  return (
+    <div className="formatted-response">
+      {blocks}
+    </div>
+  );
+}
+
+
 const workspaceData = {
   resume: {
     number: "01",
@@ -1142,7 +1321,7 @@ export default function Workspace({ activeTab, onBack }) {
                   )}
 
                   <div className="analysis-content">
-                    {analysis}
+                    <FormattedResponse content={analysis} />
                   </div>
                 </div>
               )}
@@ -1267,7 +1446,7 @@ export default function Workspace({ activeTab, onBack }) {
                   <h3>YOUR NEXT BIG BUILDS</h3>
 
                   <div className="analysis-content">
-                    {projects}
+                    <FormattedResponse content={projects} />
                   </div>
                 </div>
               )}
@@ -1354,7 +1533,7 @@ export default function Workspace({ activeTab, onBack }) {
                   </h3>
 
                   <div className="analysis-content">
-                    {roadmap}
+                    <FormattedResponse content={roadmap} />
                   </div>
                 </div>
               )}
@@ -1445,7 +1624,7 @@ export default function Workspace({ activeTab, onBack }) {
                   <h3>YOUR JOB MATCH ANALYSIS</h3>
 
                   <div className="analysis-content">
-                    {jobResults}
+                    <FormattedResponse content={jobResults} />
                   </div>
                 </div>
               )}
@@ -1554,7 +1733,7 @@ export default function Workspace({ activeTab, onBack }) {
                   <h3>YOUR INTERVIEW QUESTIONS</h3>
 
                   <div className="analysis-content">
-                    {questions}
+                    <FormattedResponse content={questions} />
                   </div>
                 </div>
               )}
@@ -1605,7 +1784,7 @@ export default function Workspace({ activeTab, onBack }) {
                     <h3>YOUR INTERVIEW FEEDBACK</h3>
 
                     <div className="analysis-content">
-                      {evaluation}
+                      <FormattedResponse content={evaluation} />
                     </div>
                   </div>
                 )}
